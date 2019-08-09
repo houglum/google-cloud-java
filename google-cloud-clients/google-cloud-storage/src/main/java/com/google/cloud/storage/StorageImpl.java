@@ -636,21 +636,70 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
                 getOptions().getClock().millisTime() + unit.toMillis(duration),
                 TimeUnit.MILLISECONDS);
 
-    StringBuilder stPath = new StringBuilder();
-    if (!blobInfo.getBucket().startsWith(PATH_DELIMITER)) {
-      stPath.append(PATH_DELIMITER);
-    }
-    stPath.append(blobInfo.getBucket());
-    if (!blobInfo.getBucket().endsWith(PATH_DELIMITER)
-        && !Strings.isNullOrEmpty(blobInfo.getName())) {
-      stPath.append(PATH_DELIMITER);
-    }
-    if (blobInfo.getName().startsWith(PATH_DELIMITER)) {
-      stPath.setLength(stPath.length() - 1);
+    checkArgument(
+        !(optionMap.get(SignUrlOption.Option.VIRTUAL_HOST_NAME) != null
+              && optionMap.get(SignUrlOption.Option.HOST_NAME) != null),
+        "Cannot specify both the VIRTUAL_HOST_STYLE and HOST_NAME SignUrlOptions together.");
+    String storageXmlHostName;
+    boolean useBucketInPath = true;
+    if (optionMap.get(SignUrlOption.Option.VIRTUAL_HOST_NAME) != null) {
+      // In virtual hosted-style endpoints, the bucket is included in the host portion of the URI
+      // instead of in the path.
+      useBucketInPath = false;
+      storageXmlHostName = (String) optionMap.get(SignUrlOption.Option.VIRTUAL_HOST_NAME);
+    } else if (optionMap.get(SignUrlOption.Option.HOST_NAME) != null) {
+      storageXmlHostName = (String) optionMap.get(SignUrlOption.Option.HOST_NAME);
+    } else {
+      storageXmlHostName = STORAGE_XML_HOST_NAME;
     }
 
-    String escapedName = UrlEscapers.urlFragmentEscaper().escape(blobInfo.getName());
-    stPath.append(escapedName.replace("?", "%3F").replace(";", "%3B"));
+    String escapedBlobName = "";
+    if (!Strings.isNullOrEmpty(blobInfo.getName())) {
+      escapedBlobName =
+          UrlEscapers.urlFragmentEscaper().escape(blobInfo.getName())
+              .replace("?", "%3F")
+              .replace(";", "%3B");
+    }
+    // Goal format is a leading forward slash, followed by each component's name, separated by
+    // only one forward slash, i.e.:
+    //   / (if bucket should not be in the path and no object was specified)
+    //   /BUCKETNAME (if no object was specified)
+    //   /OBJECTNAME (if bucket should not be in the path)
+    //   /BUCKETNAME/OBJECTNAME (if the bucket should be in the path and an object was specified)
+    // Note that we take care to avoid doubling up on forward slashes between the beginning of the
+    // path and the start of the object name, i.e. scenarios where BUCKETNAME starts or ends with
+    // '/', or OBJECTNAME starts with '/'.
+    StringBuilder stPath = new StringBuilder();
+    stPath.append(PATH_DELIMITER);
+    if (useBucketInPath) {
+      // Current path: '/'
+      // Append bucket name, then append '/' if bucket name didn't end with '/' already.
+      if (blobInfo.getBucket().startsWith(PATH_DELIMITER)) {
+        stPath.setLength(stPath.length() - 1);
+      }
+      stPath.append(blobInfo.getBucket());
+      if (!blobInfo.getBucket().endsWith(PATH_DELIMITER)) {
+        stPath.append(PATH_DELIMITER);
+      }
+      // Current path: /BUCKETNAME/
+
+      // Remove trailing '/' if object was not specified or if object starts with '/'.
+      if (escapedBlobName.isEmpty()) {
+        stPath.setLength(stPath.length() - 1);
+      } else {
+        if (escapedBlobName.startsWith(PATH_DELIMITER)) {
+          stPath.setLength(stPath.length() - 1);
+        }
+        stPath.append(escapedBlobName);
+      }
+    } else {  // Only add object (if one was specified) to the path.
+      // Current path: '/'
+      // Remove trailing '/' only if the object name already starts with '/'.
+      if (escapedBlobName.startsWith(PATH_DELIMITER)) {
+        stPath.setLength(stPath.length() - 1);
+      }
+      stPath.append(escapedBlobName);
+    }
 
     URI path = URI.create(stPath.toString());
 
@@ -660,11 +709,7 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
       String unsignedPayload = signatureInfo.constructUnsignedPayload();
       byte[] signatureBytes = credentials.sign(unsignedPayload.getBytes(UTF_8));
       StringBuilder stBuilder = new StringBuilder();
-      if (optionMap.get(SignUrlOption.Option.HOST_NAME) == null) {
-        stBuilder.append(STORAGE_XML_HOST_NAME).append(path);
-      } else {
-        stBuilder.append(optionMap.get(SignUrlOption.Option.HOST_NAME)).append(path);
-      }
+      stBuilder.append(storageXmlHostName).append(path);
 
       if (isV4) {
         BaseEncoding encoding = BaseEncoding.base16().lowerCase();
@@ -730,14 +775,21 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
 
     signatureInfoBuilder.setTimestamp(getOptions().getClock().millisTime());
 
-    @SuppressWarnings("unchecked")
-    Map<String, String> extHeaders =
-        (Map<String, String>)
-            (optionMap.containsKey(SignUrlOption.Option.EXT_HEADERS)
-                ? (Map<String, String>) optionMap.get(SignUrlOption.Option.EXT_HEADERS)
-                : Collections.emptyMap());
+    // Add this host first, allowing it to be overridden in the EXT_HEADERS option below.
+    ImmutableMap.Builder<String, String> extHeaders = new ImmutableMap.Builder<String, String>();
+    if (optionMap.containsKey(SignUrlOption.Option.VIRTUAL_HOST_NAME)) {
+      String vhost = (String) optionMap.get(SignUrlOption.Option.VIRTUAL_HOST_NAME);
+      vhost = vhost.replaceFirst("http(s)?://", "");
+      extHeaders.put("host", vhost);
+    }
 
-    return signatureInfoBuilder.setCanonicalizedExtensionHeaders(extHeaders).build();
+    if (optionMap.containsKey(SignUrlOption.Option.EXT_HEADERS)) {
+      extHeaders.putAll((Map<String, String>) optionMap.get(SignUrlOption.Option.EXT_HEADERS));
+    }
+
+    return signatureInfoBuilder
+        .setCanonicalizedExtensionHeaders((Map<String, String>) extHeaders.build())
+        .build();
   }
 
   @Override
