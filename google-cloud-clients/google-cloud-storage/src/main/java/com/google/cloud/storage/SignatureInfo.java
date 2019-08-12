@@ -155,6 +155,11 @@ public class SignatureInfo {
         .append(serializer.serializeHeaderNames(canonicalizedExtensionHeaders))
         .append(COMPONENT_SEPARATOR);
     canonicalRequest.append("UNSIGNED-PAYLOAD");
+    // DEBUG:
+    // System.out.printf(
+    //     "PRE-HASHED CANONICAL REQUEST:\n*************\n%s\n***********\n\n",
+    //     canonicalRequest.toString());
+    // END DEBUG
 
     return Hashing.sha256()
         .hashString(canonicalRequest.toString(), StandardCharsets.UTF_8)

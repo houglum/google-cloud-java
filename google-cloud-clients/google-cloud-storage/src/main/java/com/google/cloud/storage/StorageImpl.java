@@ -50,6 +50,7 @@ import com.google.cloud.Tuple;
 import com.google.cloud.storage.Acl.Entity;
 import com.google.cloud.storage.spi.v1.StorageRpc;
 import com.google.cloud.storage.spi.v1.StorageRpc.RewriteResponse;
+import com.google.common.base.CharMatcher;
 import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
@@ -616,6 +617,9 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
       optionMap.put(option.getOption(), option.getValue());
     }
 
+    boolean isV2 =
+        SignUrlOption.SignatureVersion.V2.equals(
+            optionMap.get(SignUrlOption.Option.SIGNATURE_VERSION));
     boolean isV4 =
         SignUrlOption.SignatureVersion.V4.equals(
             optionMap.get(SignUrlOption.Option.SIGNATURE_VERSION));
@@ -653,6 +657,9 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
       storageXmlHostName = STORAGE_XML_HOST_NAME;
     }
 
+    // The bucket name itself should never contain a forward slash. However, parts already existed
+    // in the code to check for this, so we remove the forward slashes to be safe here.
+    String bucketName = CharMatcher.anyOf(PATH_DELIMITER).trimFrom(blobInfo.getBucket());
     String escapedBlobName = "";
     if (!Strings.isNullOrEmpty(blobInfo.getName())) {
       escapedBlobName =
@@ -660,52 +667,23 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
               .replace("?", "%3F")
               .replace(";", "%3B");
     }
-    // Goal format is a leading forward slash, followed by each component's name, separated by
-    // only one forward slash, i.e.:
-    //   / (if bucket should not be in the path and no object was specified)
-    //   /BUCKETNAME (if no object was specified)
-    //   /OBJECTNAME (if bucket should not be in the path)
-    //   /BUCKETNAME/OBJECTNAME (if the bucket should be in the path and an object was specified)
-    // Note that we take care to avoid doubling up on forward slashes between the beginning of the
-    // path and the start of the object name, i.e. scenarios where BUCKETNAME starts or ends with
-    // '/', or OBJECTNAME starts with '/'.
-    StringBuilder stPath = new StringBuilder();
-    stPath.append(PATH_DELIMITER);
-    if (useBucketInPath) {
-      // Current path: '/'
-      // Append bucket name, then append '/' if bucket name didn't end with '/' already.
-      if (blobInfo.getBucket().startsWith(PATH_DELIMITER)) {
-        stPath.setLength(stPath.length() - 1);
-      }
-      stPath.append(blobInfo.getBucket());
-      if (!blobInfo.getBucket().endsWith(PATH_DELIMITER)) {
-        stPath.append(PATH_DELIMITER);
-      }
-      // Current path: /BUCKETNAME/
 
-      // Remove trailing '/' if object was not specified or if object starts with '/'.
-      if (escapedBlobName.isEmpty()) {
-        stPath.setLength(stPath.length() - 1);
-      } else {
-        if (escapedBlobName.startsWith(PATH_DELIMITER)) {
-          stPath.setLength(stPath.length() - 1);
-        }
-        stPath.append(escapedBlobName);
-      }
-    } else {  // Only add object (if one was specified) to the path.
-      // Current path: '/'
-      // Remove trailing '/' only if the object name already starts with '/'.
-      if (escapedBlobName.startsWith(PATH_DELIMITER)) {
-        stPath.setLength(stPath.length() - 1);
-      }
-      stPath.append(escapedBlobName);
-    }
-
-    URI path = URI.create(stPath.toString());
+    String stPath =
+        useBucketInPath
+            ? constructResourceUriPath(bucketName, escapedBlobName)
+            : constructResourceUriPath("", escapedBlobName);
+    URI path = URI.create(stPath);
+    // For V2 signing, even if we don't specify the bucket in the URI path, we still need the
+    // canonical resource string that we'll sign to include the bucket.
+    URI pathForSigning =
+        isV2
+            ? URI.create(constructResourceUriPath(bucketName, escapedBlobName))
+            : path;
 
     try {
       SignatureInfo signatureInfo =
-          buildSignatureInfo(optionMap, blobInfo, expiration, path, credentials.getAccount());
+          buildSignatureInfo(
+              optionMap, blobInfo, expiration, pathForSigning, credentials.getAccount());
       String unsignedPayload = signatureInfo.constructUnsignedPayload();
       byte[] signatureBytes = credentials.sign(unsignedPayload.getBytes(UTF_8));
       StringBuilder stBuilder = new StringBuilder();
@@ -731,6 +709,28 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
     } catch (MalformedURLException | UnsupportedEncodingException ex) {
       throw new IllegalStateException(ex);
     }
+  }
+
+  private String constructResourceUriPath(String slashlessBucketName, String escapedBlobName) {
+    if (Strings.isNullOrEmpty(slashlessBucketName)) {
+      if (Strings.isNullOrEmpty(escapedBlobName)) {
+        return PATH_DELIMITER;
+      }
+      if (escapedBlobName.startsWith(PATH_DELIMITER)) {
+        return escapedBlobName;
+      }
+      return PATH_DELIMITER + escapedBlobName;
+    }
+
+    StringBuilder pathBuilder = new StringBuilder();
+    pathBuilder.append(PATH_DELIMITER).append(slashlessBucketName);
+    if (!Strings.isNullOrEmpty(escapedBlobName)) {
+      if (!escapedBlobName.startsWith(PATH_DELIMITER)) {
+        pathBuilder.append(PATH_DELIMITER);
+      }
+      pathBuilder.append(escapedBlobName);
+    }
+    return pathBuilder.toString();
   }
 
   /**
@@ -775,9 +775,16 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
 
     signatureInfoBuilder.setTimestamp(getOptions().getClock().millisTime());
 
-    // Add this host first, allowing it to be overridden in the EXT_HEADERS option below.
     ImmutableMap.Builder<String, String> extHeaders = new ImmutableMap.Builder<String, String>();
-    if (optionMap.containsKey(SignUrlOption.Option.VIRTUAL_HOST_NAME)) {
+
+    // V2 signing requires that the header not include the bucket, but V4 signing requires that
+    // the host name used in the URI must match the "host" header.
+    boolean setHostHeaderToVirtualHost =
+        optionMap.containsKey(SignUrlOption.Option.VIRTUAL_HOST_NAME)
+        && SignUrlOption.SignatureVersion.V4.equals(
+               optionMap.get(SignUrlOption.Option.SIGNATURE_VERSION));
+    // Add this host first if needed, allowing it to be overridden in the EXT_HEADERS option below.
+    if (setHostHeaderToVirtualHost) {
       String vhost = (String) optionMap.get(SignUrlOption.Option.VIRTUAL_HOST_NAME);
       vhost = vhost.replaceFirst("http(s)?://", "");
       extHeaders.put("host", vhost);
