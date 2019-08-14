@@ -670,14 +670,14 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
 
     String stPath =
         useBucketInPath
-            ? constructResourceUriPath(bucketName, escapedBlobName)
-            : constructResourceUriPath("", escapedBlobName);
+            ? constructResourceUriPath(bucketName, escapedBlobName, optionMap)
+            : constructResourceUriPath("", escapedBlobName, optionMap);
     URI path = URI.create(stPath);
     // For V2 signing, even if we don't specify the bucket in the URI path, we still need the
     // canonical resource string that we'll sign to include the bucket.
     URI pathForSigning =
         isV2
-            ? URI.create(constructResourceUriPath(bucketName, escapedBlobName))
+            ? URI.create(constructResourceUriPath(bucketName, escapedBlobName, optionMap))
             : path;
 
     try {
@@ -711,7 +711,9 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
     }
   }
 
-  private String constructResourceUriPath(String slashlessBucketName, String escapedBlobName) {
+  private String constructResourceUriPath(
+      String slashlessBucketName, String escapedBlobName,
+      EnumMap<SignUrlOption.Option, Object> optionMap) {
     if (Strings.isNullOrEmpty(slashlessBucketName)) {
       if (Strings.isNullOrEmpty(escapedBlobName)) {
         return PATH_DELIMITER;
@@ -724,12 +726,20 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
 
     StringBuilder pathBuilder = new StringBuilder();
     pathBuilder.append(PATH_DELIMITER).append(slashlessBucketName);
-    if (!Strings.isNullOrEmpty(escapedBlobName)) {
-      if (!escapedBlobName.startsWith(PATH_DELIMITER)) {
+    if (Strings.isNullOrEmpty(escapedBlobName)) {
+      // If using virtual-hosted style URLs with V2 signing, the path string for a bucket resource
+      // must end with a forward slash.
+      if (optionMap.get(SignUrlOption.Option.VIRTUAL_HOST_NAME) != null
+          && SignUrlOption.SignatureVersion.V2.equals(
+                 optionMap.get(SignUrlOption.Option.SIGNATURE_VERSION))) {
         pathBuilder.append(PATH_DELIMITER);
       }
-      pathBuilder.append(escapedBlobName);
+      return pathBuilder.toString();
     }
+    if (!escapedBlobName.startsWith(PATH_DELIMITER)) {
+      pathBuilder.append(PATH_DELIMITER);
+    }
+    pathBuilder.append(escapedBlobName);
     return pathBuilder.toString();
   }
 
