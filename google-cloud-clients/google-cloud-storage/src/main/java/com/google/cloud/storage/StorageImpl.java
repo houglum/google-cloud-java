@@ -54,10 +54,12 @@ import com.google.common.base.CharMatcher;
 import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
+import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
+import com.google.common.collect.ListMultimap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.hash.Hashing;
@@ -78,7 +80,6 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeMap;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 
@@ -819,18 +820,13 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
       extHeaders.putAll((Map<String, String>) optionMap.get(SignUrlOption.Option.EXT_HEADERS));
     }
 
-    // We use a TreeMap so we can later iterate through the params in code point order.
-    TreeMap<String, List<String>> paramMap = new TreeMap<String, List<String>>();
+    ListMultimap<String, String> paramMap = ArrayListMultimap.create();
     if (optionMap.containsKey(SignUrlOption.Option.CANONICAL_QUERY_PARAM)) {
       ArrayList<SignatureInfo.QueryParamPair> pairs =
           (ArrayList<SignatureInfo.QueryParamPair>)
               optionMap.get(SignUrlOption.Option.CANONICAL_QUERY_PARAM);
       for (SignatureInfo.QueryParamPair pair : pairs) {
-        if (!paramMap.containsKey(pair.getKey())) {
-          paramMap.put(pair.getKey(), Lists.newArrayList(pair.getValue()));
-        } else {
-          paramMap.get(pair.getKey()).add(pair.getValue());
-        }
+        paramMap.put(pair.getKey(), pair.getValue());
       }
     }
 
