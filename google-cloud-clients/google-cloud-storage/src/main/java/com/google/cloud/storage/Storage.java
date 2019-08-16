@@ -909,7 +909,8 @@ public interface Storage extends Service<StorageOptions> {
       SERVICE_ACCOUNT_CRED,
       SIGNATURE_VERSION,
       HOST_NAME,
-      VIRTUAL_HOST_NAME
+      VIRTUAL_HOST_NAME,
+      CANONICAL_QUERY_PARAM
     }
 
     enum SignatureVersion {
@@ -1017,6 +1018,19 @@ public interface Storage extends Service<StorageOptions> {
       return new SignUrlOption(Option.VIRTUAL_HOST_NAME, virtualHostName);
     }
 
+    /**
+     * Include an additional query string parameter used to generate the URL signature. Any
+     * specified parameter must be included in requests using this signed URL. May only be used with
+     * the V4 signing method. Note that if one of the well-known required query string parameters is
+     * provided here, it will be overridden.
+     *
+     * @see <a href="https://cloud.google.com/storage/docs/authentication/canonical-requests">
+     *     Canonical Requests</a>
+     */
+    public static SignUrlOption withCanonicalQueryParam(String key, String value) {
+      return new SignUrlOption(
+          Option.CANONICAL_QUERY_PARAM, new SignatureInfo.QueryParamPair(key, value));
+    }
   }
 
   /**

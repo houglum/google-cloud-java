@@ -71,12 +71,14 @@ import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URL;
 import java.net.URLEncoder;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 
@@ -614,7 +616,16 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
   public URL signUrl(BlobInfo blobInfo, long duration, TimeUnit unit, SignUrlOption... options) {
     EnumMap<SignUrlOption.Option, Object> optionMap = Maps.newEnumMap(SignUrlOption.Option.class);
     for (SignUrlOption option : options) {
-      optionMap.put(option.getOption(), option.getValue());
+      // Special case where we can have multiple values for the same option:
+      if (option.getOption().equals(SignUrlOption.Option.CANONICAL_QUERY_PARAM)) {
+        if (!optionMap.containsKey(option.getOption())) {
+          optionMap.put(option.getOption(), new ArrayList<SignatureInfo.QueryParamPair>());
+        }
+        ((ArrayList<SignatureInfo.QueryParamPair>) optionMap.get(option.getOption()))
+            .add((SignatureInfo.QueryParamPair) option.getValue());
+      } else {
+        optionMap.put(option.getOption(), option.getValue());
+      }
     }
 
     boolean isV2 =
@@ -623,6 +634,14 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
     boolean isV4 =
         SignUrlOption.SignatureVersion.V4.equals(
             optionMap.get(SignUrlOption.Option.SIGNATURE_VERSION));
+
+    checkArgument(
+        !optionMap.containsKey(SignUrlOption.Option.CANONICAL_QUERY_PARAM) || isV4,
+        "The CANONICAL_QUERY_PARAMS SignUrlOption can only be used with the V4 signing method.");
+    checkArgument(
+        !(optionMap.containsKey(SignUrlOption.Option.VIRTUAL_HOST_NAME)
+            && optionMap.containsKey(SignUrlOption.Option.HOST_NAME)),
+        "Cannot specify both the VIRTUAL_HOST_STYLE and HOST_NAME SignUrlOptions together.");
 
     ServiceAccountSigner credentials =
         (ServiceAccountSigner) optionMap.get(SignUrlOption.Option.SERVICE_ACCOUNT_CRED);
@@ -640,10 +659,6 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
                 getOptions().getClock().millisTime() + unit.toMillis(duration),
                 TimeUnit.MILLISECONDS);
 
-    checkArgument(
-        !(optionMap.get(SignUrlOption.Option.VIRTUAL_HOST_NAME) != null
-              && optionMap.get(SignUrlOption.Option.HOST_NAME) != null),
-        "Cannot specify both the VIRTUAL_HOST_STYLE and HOST_NAME SignUrlOptions together.");
     String storageXmlHostName;
     boolean useBucketInPath = true;
     if (optionMap.get(SignUrlOption.Option.VIRTUAL_HOST_NAME) != null) {
@@ -663,7 +678,8 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
     String escapedBlobName = "";
     if (!Strings.isNullOrEmpty(blobInfo.getName())) {
       escapedBlobName =
-          UrlEscapers.urlFragmentEscaper().escape(blobInfo.getName())
+          UrlEscapers.urlFragmentEscaper()
+              .escape(blobInfo.getName())
               .replace("?", "%3F")
               .replace(";", "%3B");
     }
@@ -676,9 +692,7 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
     // For V2 signing, even if we don't specify the bucket in the URI path, we still need the
     // canonical resource string that we'll sign to include the bucket.
     URI pathForSigning =
-        isV2
-            ? URI.create(constructResourceUriPath(bucketName, escapedBlobName, optionMap))
-            : path;
+        isV2 ? URI.create(constructResourceUriPath(bucketName, escapedBlobName, optionMap)) : path;
 
     try {
       SignatureInfo signatureInfo =
@@ -712,7 +726,8 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
   }
 
   private String constructResourceUriPath(
-      String slashlessBucketName, String escapedBlobName,
+      String slashlessBucketName,
+      String escapedBlobName,
       EnumMap<SignUrlOption.Option, Object> optionMap) {
     if (Strings.isNullOrEmpty(slashlessBucketName)) {
       if (Strings.isNullOrEmpty(escapedBlobName)) {
@@ -731,7 +746,7 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
       // must end with a forward slash.
       if (optionMap.get(SignUrlOption.Option.VIRTUAL_HOST_NAME) != null
           && SignUrlOption.SignatureVersion.V2.equals(
-                 optionMap.get(SignUrlOption.Option.SIGNATURE_VERSION))) {
+              optionMap.get(SignUrlOption.Option.SIGNATURE_VERSION))) {
         pathBuilder.append(PATH_DELIMITER);
       }
       return pathBuilder.toString();
@@ -791,8 +806,8 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
     // the host name used in the URI must match the "host" header.
     boolean setHostHeaderToVirtualHost =
         optionMap.containsKey(SignUrlOption.Option.VIRTUAL_HOST_NAME)
-        && SignUrlOption.SignatureVersion.V4.equals(
-               optionMap.get(SignUrlOption.Option.SIGNATURE_VERSION));
+            && SignUrlOption.SignatureVersion.V4.equals(
+                optionMap.get(SignUrlOption.Option.SIGNATURE_VERSION));
     // Add this host first if needed, allowing it to be overridden in the EXT_HEADERS option below.
     if (setHostHeaderToVirtualHost) {
       String vhost = (String) optionMap.get(SignUrlOption.Option.VIRTUAL_HOST_NAME);
@@ -804,8 +819,24 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
       extHeaders.putAll((Map<String, String>) optionMap.get(SignUrlOption.Option.EXT_HEADERS));
     }
 
+    // We use a TreeMap so we can later iterate through the params in code point order.
+    TreeMap<String, List<String>> paramMap = new TreeMap<String, List<String>>();
+    if (optionMap.containsKey(SignUrlOption.Option.CANONICAL_QUERY_PARAM)) {
+      ArrayList<SignatureInfo.QueryParamPair> pairs =
+          (ArrayList<SignatureInfo.QueryParamPair>)
+              optionMap.get(SignUrlOption.Option.CANONICAL_QUERY_PARAM);
+      for (SignatureInfo.QueryParamPair pair : pairs) {
+        if (!paramMap.containsKey(pair.getKey())) {
+          paramMap.put(pair.getKey(), Lists.newArrayList(pair.getValue()));
+        } else {
+          paramMap.get(pair.getKey()).add(pair.getValue());
+        }
+      }
+    }
+
     return signatureInfoBuilder
         .setCanonicalizedExtensionHeaders((Map<String, String>) extHeaders.build())
+        .setCanonicalizedQueryParams(paramMap)
         .build();
   }
 
