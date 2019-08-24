@@ -90,7 +90,9 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
   private static final String EMPTY_BYTE_ARRAY_CRC32C = "AAAAAA==";
   private static final String PATH_DELIMITER = "/";
   /** Signed URLs are only supported through the GCS XML API endpoint. */
-  private static final String STORAGE_XML_HOST_NAME = "https://storage.googleapis.com";
+  private static final String STORAGE_XML_URI_SCHEME = "https";
+
+  private static final String STORAGE_XML_URI_HOST_NAME = "storage.googleapis.com";
 
   private static final Function<Tuple<Storage, Boolean>, Boolean> DELETE_FUNCTION =
       new Function<Tuple<Storage, Boolean>, Boolean>() {
@@ -660,22 +662,12 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
                 getOptions().getClock().millisTime() + unit.toMillis(duration),
                 TimeUnit.MILLISECONDS);
 
-    String storageXmlHostName;
-    boolean useBucketInPath = true;
-    if (optionMap.get(SignUrlOption.Option.VIRTUAL_HOST_NAME) != null) {
-      // In virtual hosted-style endpoints, the bucket is included in the host portion of the URI
-      // instead of in the path.
-      useBucketInPath = false;
-      storageXmlHostName = (String) optionMap.get(SignUrlOption.Option.VIRTUAL_HOST_NAME);
-    } else if (optionMap.get(SignUrlOption.Option.HOST_NAME) != null) {
-      storageXmlHostName = (String) optionMap.get(SignUrlOption.Option.HOST_NAME);
-    } else {
-      storageXmlHostName = STORAGE_XML_HOST_NAME;
-    }
+    checkArgument(
+        !(optionMap.get(SignUrlOption.Option.VIRTUAL_HOST_NAME) != null
+            && optionMap.get(SignUrlOption.Option.HOST_NAME) != null),
+        "Cannot specify both the VIRTUAL_HOST_STYLE and HOST_NAME SignUrlOptions together.");
 
-    // The bucket name itself should never contain a forward slash. However, parts already existed
-    // in the code to check for this, so we remove the forward slashes to be safe here.
-    String bucketName = CharMatcher.anyOf(PATH_DELIMITER).trimFrom(blobInfo.getBucket());
+    String bucketName = slashlessBucketNameFromBlobInfo(blobInfo);
     String escapedBlobName = "";
     if (!Strings.isNullOrEmpty(blobInfo.getName())) {
       escapedBlobName =
@@ -683,6 +675,21 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
               .escape(blobInfo.getName())
               .replace("?", "%3F")
               .replace(";", "%3B");
+    }
+
+    String storageXmlHostName;
+    boolean useBucketInPath = true;
+    if (optionMap.get(SignUrlOption.Option.VIRTUAL_HOST_NAME) != null) {
+      // In virtual hosted-style endpoints, the bucket is included in the host portion of the URI
+      // instead of in the path.
+      useBucketInPath = false;
+      storageXmlHostName =
+          virtualHostFromOptionValue(
+              (String) optionMap.get(SignUrlOption.Option.VIRTUAL_HOST_NAME), bucketName);
+    } else if (optionMap.get(SignUrlOption.Option.HOST_NAME) != null) {
+      storageXmlHostName = (String) optionMap.get(SignUrlOption.Option.HOST_NAME);
+    } else {
+      storageXmlHostName = STORAGE_XML_URI_SCHEME + "://" + STORAGE_XML_URI_HOST_NAME;
     }
 
     String stPath =
@@ -811,7 +818,10 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
                 optionMap.get(SignUrlOption.Option.SIGNATURE_VERSION));
     // Add this host first if needed, allowing it to be overridden in the EXT_HEADERS option below.
     if (setHostHeaderToVirtualHost) {
-      String vhost = (String) optionMap.get(SignUrlOption.Option.VIRTUAL_HOST_NAME);
+      String vhost =
+          virtualHostFromOptionValue(
+              (String) optionMap.get(SignUrlOption.Option.VIRTUAL_HOST_NAME),
+              slashlessBucketNameFromBlobInfo(blobInfo));
       vhost = vhost.replaceFirst("http(s)?://", "");
       extHeaders.put("host", vhost);
     }
@@ -834,6 +844,19 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
         .setCanonicalizedExtensionHeaders((Map<String, String>) extHeaders.build())
         .setCanonicalizedQueryParams(paramMap)
         .build();
+  }
+
+  private String slashlessBucketNameFromBlobInfo(BlobInfo blobInfo) {
+    // The bucket name itself should never contain a forward slash. However, parts already existed
+    // in the code to check for this, so we remove the forward slashes to be safe here.
+    return CharMatcher.anyOf(PATH_DELIMITER).trimFrom(blobInfo.getBucket());
+  }
+
+  private String virtualHostFromOptionValue(String vhostOptionValue, String bucketName) {
+    if (Strings.isNullOrEmpty(vhostOptionValue)) {
+      return STORAGE_XML_URI_SCHEME + "://" + bucketName + "." + STORAGE_XML_URI_HOST_NAME;
+    }
+    return vhostOptionValue;
   }
 
   @Override
