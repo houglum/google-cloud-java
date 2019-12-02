@@ -19,7 +19,9 @@ package com.google.cloud.storage;
 import static com.google.common.base.Preconditions.checkArgument;
 
 import com.google.common.collect.ArrayListMultimap;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ListMultimap;
 import com.google.common.collect.Lists;
 import com.google.common.hash.Hashing;
 import com.google.common.net.UrlEscapers;
@@ -46,12 +48,20 @@ public class SignatureInfo {
   public static final char COMPONENT_SEPARATOR = '\n';
   public static final String GOOG4_RSA_SHA256 = "GOOG4-RSA-SHA256";
   public static final String SCOPE = "/auto/storage/goog4_request";
+  private static final List<String> RESERVED_PARAMS_LOWER =
+      ImmutableList.<String>of(
+          "x-goog-algorithm",
+          "x-goog-credential",
+          "x-goog-date",
+          "x-goog-expires",
+          "x-goog-signedheaders");
 
   private final HttpMethod httpVerb;
   private final String contentMd5;
   private final String contentType;
   private final long expiration;
   private final Map<String, String> canonicalizedExtensionHeaders;
+  private final ListMultimap<String, String> canonicalizedQueryParams;
   private final URI canonicalizedResource;
   private final Storage.SignUrlOption.SignatureVersion signatureVersion;
   private final String accountEmail;
@@ -70,17 +80,16 @@ public class SignatureInfo {
     this.accountEmail = builder.accountEmail;
     this.timestamp = builder.timestamp;
 
+    ImmutableMap.Builder<String, String> headerBuilder =
+        new ImmutableMap.Builder<String, String>().putAll(builder.canonicalizedExtensionHeaders);
     // The "host" header only needs to be present and signed if using V4.
     if (Storage.SignUrlOption.SignatureVersion.V4.equals(signatureVersion)
         && (!builder.canonicalizedExtensionHeaders.containsKey("host"))) {
-      canonicalizedExtensionHeaders =
-          new ImmutableMap.Builder<String, String>()
-              .putAll(builder.canonicalizedExtensionHeaders)
-              .put("host", "storage.googleapis.com")
-              .build();
-    } else {
-      canonicalizedExtensionHeaders = builder.canonicalizedExtensionHeaders;
+      headerBuilder.put("host", "storage.googleapis.com");
     }
+    canonicalizedExtensionHeaders = headerBuilder.build();
+
+    canonicalizedQueryParams = ArrayListMultimap.create(builder.canonicalizedQueryParams);
 
     Date date = new Date(timestamp);
 
@@ -123,7 +132,7 @@ public class SignatureInfo {
     payload.append(COMPONENT_SEPARATOR);
     payload.append(expiration).append(COMPONENT_SEPARATOR);
 
-    if (canonicalizedExtensionHeaders != null) {
+    if (canonicalizedExtensionHeaders.size() > 0) {
       payload.append(
           new CanonicalExtensionHeadersSerializer(Storage.SignUrlOption.SignatureVersion.V2)
               .serialize(canonicalizedExtensionHeaders));
@@ -168,10 +177,21 @@ public class SignatureInfo {
   }
 
   public String constructV4QueryString() {
-    ArrayListMultimap<String, String> paramMap = ArrayListMultimap.create();
+    ListMultimap<String, String> paramMap = ArrayListMultimap.create();
 
-    // TODO: Once we support supplying additional query params, we should remove any of the reserved
-    // ones that users might have added.
+    // Remove any instances of well-known required headers that might have been supplied by the
+    // caller. We'll calculate and populate them below.
+    for (String key : canonicalizedQueryParams.keySet()) {
+      // Convert to (and check for the existence of) lowercase keys to prevent cases like a user
+      // supplying "x-goog-algorithm", in order to prevent the resulting query string from
+      // containing "x-goog-algorithm" and "X-Goog-Algorithm".
+      if (!RESERVED_PARAMS_LOWER.contains(key.toLowerCase())) {
+        for (String value : canonicalizedQueryParams.get(key)) {
+          // URI encode user-supplied values.
+          paramMap.put(key, UrlEscapers.urlFormParameterEscaper().escape(value));
+        }
+      }
+    }
 
     // Add in the reserved auth-specific query params.
     paramMap.put(
@@ -232,6 +252,10 @@ public class SignatureInfo {
     return canonicalizedExtensionHeaders;
   }
 
+  public ListMultimap<String, String> getCanonicalizedQueryParams() {
+    return canonicalizedQueryParams;
+  }
+
   public URI getCanonicalizedResource() {
     return canonicalizedResource;
   }
@@ -248,6 +272,24 @@ public class SignatureInfo {
     return accountEmail;
   }
 
+  public static final class QueryParamPair {
+    private String key;
+    private String value;
+
+    public QueryParamPair(String key, String value) {
+      this.key = key;
+      this.value = value;
+    }
+
+    public String getKey() {
+      return key;
+    }
+
+    public String getValue() {
+      return value;
+    }
+  }
+
   public static final class Builder {
 
     private final HttpMethod httpVerb;
@@ -255,6 +297,7 @@ public class SignatureInfo {
     private String contentType;
     private final long expiration;
     private Map<String, String> canonicalizedExtensionHeaders;
+    private ListMultimap<String, String> canonicalizedQueryParams;
     private final URI canonicalizedResource;
     private Storage.SignUrlOption.SignatureVersion signatureVersion;
     private String accountEmail;
@@ -280,6 +323,7 @@ public class SignatureInfo {
       this.contentType = signatureInfo.contentType;
       this.expiration = signatureInfo.expiration;
       this.canonicalizedExtensionHeaders = signatureInfo.canonicalizedExtensionHeaders;
+      this.canonicalizedQueryParams = signatureInfo.canonicalizedQueryParams;
       this.canonicalizedResource = signatureInfo.canonicalizedResource;
       this.signatureVersion = signatureInfo.signatureVersion;
       this.accountEmail = signatureInfo.accountEmail;
@@ -301,6 +345,13 @@ public class SignatureInfo {
     public Builder setCanonicalizedExtensionHeaders(
         Map<String, String> canonicalizedExtensionHeaders) {
       this.canonicalizedExtensionHeaders = canonicalizedExtensionHeaders;
+
+      return this;
+    }
+
+    public Builder setCanonicalizedQueryParams(
+        ListMultimap<String, String> canonicalizedQueryParams) {
+      this.canonicalizedQueryParams = canonicalizedQueryParams;
 
       return this;
     }
@@ -338,6 +389,10 @@ public class SignatureInfo {
 
       if (canonicalizedExtensionHeaders == null) {
         canonicalizedExtensionHeaders = new HashMap<>();
+      }
+
+      if (canonicalizedQueryParams == null) {
+        canonicalizedQueryParams = ArrayListMultimap.create();
       }
 
       return new SignatureInfo(this);

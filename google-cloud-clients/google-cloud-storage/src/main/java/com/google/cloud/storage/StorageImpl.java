@@ -55,10 +55,12 @@ import com.google.common.base.CharMatcher;
 import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
+import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
+import com.google.common.collect.ListMultimap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.hash.Hashing;
@@ -72,6 +74,7 @@ import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URL;
 import java.net.URLEncoder;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumMap;
@@ -634,6 +637,16 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
   public URL signUrl(BlobInfo blobInfo, long duration, TimeUnit unit, SignUrlOption... options) {
     EnumMap<SignUrlOption.Option, Object> optionMap = Maps.newEnumMap(SignUrlOption.Option.class);
     for (SignUrlOption option : options) {
+      // Special case where we can have multiple values for the same option:
+      if (option.getOption().equals(SignUrlOption.Option.QUERY_PARAM)) {
+        if (!optionMap.containsKey(option.getOption())) {
+          optionMap.put(option.getOption(), new ArrayList<SignatureInfo.QueryParamPair>());
+        }
+        ((ArrayList<SignatureInfo.QueryParamPair>) optionMap.get(option.getOption()))
+            .add((SignatureInfo.QueryParamPair) option.getValue());
+      } else {
+        optionMap.put(option.getOption(), option.getValue());
+      }
       optionMap.put(option.getOption(), option.getValue());
     }
 
@@ -658,6 +671,9 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
                 getOptions().getClock().millisTime() + unit.toMillis(duration),
                 TimeUnit.MILLISECONDS);
 
+    checkArgument(
+        !(!isV4 && optionMap.containsKey(SignUrlOption.Option.QUERY_PARAM)),
+        "The QUERY_PARAM SignUrlOption can only be used with the V4 signing method.");
     checkArgument(
         !(optionMap.containsKey(SignUrlOption.Option.VIRTUAL_HOSTED_STYLE)
             && optionMap.containsKey(SignUrlOption.Option.PATH_STYLE)),
@@ -839,8 +855,18 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
       extHeaders.putAll((Map<String, String>) optionMap.get(SignUrlOption.Option.EXT_HEADERS));
     }
 
+    ListMultimap<String, String> paramMap = ArrayListMultimap.create();
+    if (optionMap.containsKey(SignUrlOption.Option.QUERY_PARAM)) {
+      ArrayList<SignatureInfo.QueryParamPair> pairs =
+          (ArrayList<SignatureInfo.QueryParamPair>) optionMap.get(SignUrlOption.Option.QUERY_PARAM);
+      for (SignatureInfo.QueryParamPair pair : pairs) {
+        paramMap.put(pair.getKey(), pair.getValue());
+      }
+    }
+
     return signatureInfoBuilder
         .setCanonicalizedExtensionHeaders((Map<String, String>) extHeaders.build())
+        .setCanonicalizedQueryParams(paramMap)
         .build();
   }
 
