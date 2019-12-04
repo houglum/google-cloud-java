@@ -74,7 +74,6 @@ import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URL;
 import java.net.URLEncoder;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumMap;
@@ -637,17 +636,19 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
   public URL signUrl(BlobInfo blobInfo, long duration, TimeUnit unit, SignUrlOption... options) {
     EnumMap<SignUrlOption.Option, Object> optionMap = Maps.newEnumMap(SignUrlOption.Option.class);
     for (SignUrlOption option : options) {
-      // Special case where we can have multiple values for the same option:
+      // Special case where we can have multiple values for the same option, so we use a map to
+      // store all query parameters:
       if (option.getOption().equals(SignUrlOption.Option.QUERY_PARAM)) {
-        if (!optionMap.containsKey(option.getOption())) {
-          optionMap.put(option.getOption(), new ArrayList<SignatureInfo.QueryParamPair>());
+        SignUrlOption.Option qpOption = SignUrlOption.Option.QUERY_PARAM;
+        SignatureInfo.QueryParamPair qpPair = (SignatureInfo.QueryParamPair) option.getValue();
+        if (!optionMap.containsKey(qpOption)) {
+          optionMap.put(qpOption, ArrayListMultimap.<String, String>create());
         }
-        ((ArrayList<SignatureInfo.QueryParamPair>) optionMap.get(option.getOption()))
-            .add((SignatureInfo.QueryParamPair) option.getValue());
+        ((ArrayListMultimap<String, String>) optionMap.get(qpOption))
+            .put(qpPair.getKey(), qpPair.getValue());
       } else {
         optionMap.put(option.getOption(), option.getValue());
       }
-      optionMap.put(option.getOption(), option.getValue());
     }
 
     boolean isV2 =
@@ -835,7 +836,8 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
 
     signatureInfoBuilder.setTimestamp(getOptions().getClock().millisTime());
 
-    ImmutableMap.Builder<String, String> extHeaders = new ImmutableMap.Builder<String, String>();
+    ImmutableMap.Builder<String, String> extHeadersBuilder =
+        new ImmutableMap.Builder<String, String>();
 
     boolean isV4 =
         SignUrlOption.SignatureVersion.V4.equals(
@@ -843,29 +845,27 @@ final class StorageImpl extends BaseService<StorageOptions> implements Storage {
     if (isV4) { // We don't sign the host header for V2 signed URLs; only do this for V4.
       // Add the host here first, allowing it to be overridden in the EXT_HEADERS option below.
       if (optionMap.containsKey(SignUrlOption.Option.VIRTUAL_HOSTED_STYLE)) {
-        extHeaders.put(
+        extHeadersBuilder.put(
             "host",
             slashlessBucketNameFromBlobInfo(blobInfo) + "." + getBaseStorageHostName(optionMap));
       } else if (optionMap.containsKey(SignUrlOption.Option.HOST_NAME)) {
-        extHeaders.put("host", getBaseStorageHostName(optionMap));
+        extHeadersBuilder.put("host", getBaseStorageHostName(optionMap));
       }
     }
 
     if (optionMap.containsKey(SignUrlOption.Option.EXT_HEADERS)) {
-      extHeaders.putAll((Map<String, String>) optionMap.get(SignUrlOption.Option.EXT_HEADERS));
+      extHeadersBuilder.putAll(
+          (Map<String, String>) optionMap.get(SignUrlOption.Option.EXT_HEADERS));
     }
 
     ListMultimap<String, String> paramMap = ArrayListMultimap.create();
     if (optionMap.containsKey(SignUrlOption.Option.QUERY_PARAM)) {
-      ArrayList<SignatureInfo.QueryParamPair> pairs =
-          (ArrayList<SignatureInfo.QueryParamPair>) optionMap.get(SignUrlOption.Option.QUERY_PARAM);
-      for (SignatureInfo.QueryParamPair pair : pairs) {
-        paramMap.put(pair.getKey(), pair.getValue());
-      }
+      paramMap.putAll(
+          (ArrayListMultimap<String, String>) optionMap.get(SignUrlOption.Option.QUERY_PARAM));
     }
 
     return signatureInfoBuilder
-        .setCanonicalizedExtensionHeaders((Map<String, String>) extHeaders.build())
+        .setCanonicalizedExtensionHeaders((Map<String, String>) extHeadersBuilder.build())
         .setCanonicalizedQueryParams(paramMap)
         .build();
   }
